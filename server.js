@@ -113,6 +113,7 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
         } while (gameCursor && gameSafety < 5); // maksimal ~250 game
 
         // 2) Ambil semua gamepass dari tiap game tsb (paralel)
+        const debugPerGame = [];
         const gamepassesPerGame = await Promise.all(
             allGames.map(async (game) => {
                 try {
@@ -121,6 +122,9 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
                         { timeout: 15000 }
                     );
                     const passData = passRes.data;
+                    const count = passData && Array.isArray(passData.data) ? passData.data.length : 0;
+                    debugPerGame.push({ gameId: game.id, gameName: game.name, passCount: count });
+
                     if (!passData || !Array.isArray(passData.data)) return [];
 
                     return passData.data.map((gp) => ({
@@ -131,6 +135,8 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
                         universeId: game.id,
                     }));
                 } catch (e) {
+                    console.error(`gamepasses-for-user: gagal ambil pass game ${game.id} (${game.name}):`, e.message);
+                    debugPerGame.push({ gameId: game.id, gameName: game.name, error: e.message });
                     return [];
                 }
             })
@@ -143,6 +149,10 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
             userId,
             username: userLookup.username,
             gamepasses: allPasses,
+            debug: {
+                gamesFound: allGames.length,
+                games: debugPerGame,
+            },
         });
     } catch (error) {
         console.error('gamepasses-for-user error:', error.message);
