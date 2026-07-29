@@ -99,6 +99,7 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
         let gamepassIds = [];
         let pageNumber = 1;
         const MAX_PAGES = 10; // safety cap (~500 item kalau 50/halaman)
+        let debugInfo = null;
 
         while (pageNumber <= MAX_PAGES) {
             const url = `https://inventory.roblox.com/v1/users/${userId}/items/GamePass?pageNumber=${pageNumber}`;
@@ -106,8 +107,18 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
             try {
                 const invRes = await axios.get(url, { timeout: 15000 });
                 data = invRes.data;
+                if (pageNumber === 1) {
+                    debugInfo = { page1Status: invRes.status, page1RawSample: JSON.stringify(data).slice(0, 500) };
+                }
             } catch (e) {
                 console.error(`gamepasses-for-user: gagal ambil halaman ${pageNumber}:`, e.message);
+                if (pageNumber === 1) {
+                    debugInfo = {
+                        page1Error: e.message,
+                        page1Status: e.response ? e.response.status : null,
+                        page1Body: e.response ? JSON.stringify(e.response.data).slice(0, 500) : null,
+                    };
+                }
                 break;
             }
 
@@ -129,6 +140,7 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
             userId,
             username: userLookup.username,
             gamepassIds,
+            debug: debugInfo,
         });
     } catch (error) {
         console.error('gamepasses-for-user error:', error.message);
