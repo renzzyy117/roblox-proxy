@@ -76,11 +76,11 @@ app.get('/verify-username', requireSecret, async (req, res) => {
 
 // ================== GAMEPASSES FOR USER ==================
 // GET /gamepasses-for-user?username=NamaUser
-// Ambil SEMUA gamepass yang dijual dari game-game bikinan target user itu
-// sendiri -- otomatis, tanpa perlu UNIVERSE_ID manual.
-//
-// Alur: username -> userId -> semua game publik milik userId -> semua
-// gamepass dari tiap game itu -> digabung jadi satu list.
+// Ambil SEMUA gamepass yang ada di inventory/koleksi target user itu,
+// langsung dari inventory.roblox.com -- tanpa perlu cari game satu-satu.
+// Detail nama/harga tiap gamepass BELUM diisi di sini; itu diambil di sisi
+// Roblox (server script) pakai MarketplaceService:GetProductInfo, biar
+// lebih ringan & gak perlu request HTTP tambahan per item dari backend.
 app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
     const { username } = req.query;
 
@@ -95,64 +95,40 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
         }
         const { userId } = userLookup;
 
-        // 1) Ambil semua game publik milik user ini (dengan pagination, dibatasi biar gak kelamaan)
-        let allGames = [];
-        let gameCursor = '';
-        let gameSafety = 0;
+        // Pagination lama Roblox (pageNumber), berhenti kalau halaman kosong / error
+        let gamepassIds = [];
+        let pageNumber = 1;
+        const MAX_PAGES = 10; // safety cap (~500 item kalau 50/halaman)
 
-        do {
-            const url = `https://games.roblox.com/v2/users/${userId}/games?accessFilter=Public&limit=50&sortOrder=Asc${gameCursor ? `&cursor=${gameCursor}` : ''}`;
-            const gameRes = await axios.get(url, { timeout: 15000 });
-            const gameData = gameRes.data;
-
-            if (gameData && Array.isArray(gameData.data)) {
-                allGames = allGames.concat(gameData.data);
+        while (pageNumber <= MAX_PAGES) {
+            const url = `https://inventory.roblox.com/v1/users/${userId}/items/GamePass?pageNumber=${pageNumber}`;
+            let data;
+            try {
+                const invRes = await axios.get(url, { timeout: 15000 });
+                data = invRes.data;
+            } catch (e) {
+                console.error(`gamepasses-for-user: gagal ambil halaman ${pageNumber}:`, e.message);
+                break;
             }
-            gameCursor = gameData && gameData.nextPageCursor ? gameData.nextPageCursor : '';
-            gameSafety += 1;
-        } while (gameCursor && gameSafety < 5); // maksimal ~250 game
 
-        // 2) Ambil semua gamepass dari tiap game tsb (paralel)
-        const debugPerGame = [];
-        const gamepassesPerGame = await Promise.all(
-            allGames.map(async (game) => {
-                try {
-                    const passRes = await axios.get(
-                        `https://games.roblox.com/v1/games/${game.id}/game-passes?limit=100&sortOrder=Asc`,
-                        { timeout: 15000 }
-                    );
-                    const passData = passRes.data;
-                    const count = passData && Array.isArray(passData.data) ? passData.data.length : 0;
-                    debugPerGame.push({ gameId: game.id, gameName: game.name, passCount: count });
+            if (!data || !Array.isArray(data.data) || data.data.length === 0) {
+                break;
+            }
 
-                    if (!passData || !Array.isArray(passData.data)) return [];
-
-                    return passData.data.map((gp) => ({
-                        id: gp.id,
-                        name: gp.displayName || gp.name,
-                        price: gp.price === null || gp.price === undefined ? 0 : gp.price,
-                        gameName: game.name,
-                        universeId: game.id,
-                    }));
-                } catch (e) {
-                    console.error(`gamepasses-for-user: gagal ambil pass game ${game.id} (${game.name}):`, e.message);
-                    debugPerGame.push({ gameId: game.id, gameName: game.name, error: e.message });
-                    return [];
+            for (const item of data.data) {
+                if (item && item.id && !gamepassIds.includes(item.id)) {
+                    gamepassIds.push(item.id);
                 }
-            })
-        );
+            }
 
-        const allPasses = gamepassesPerGame.flat();
+            pageNumber += 1;
+        }
 
         return res.status(200).json({
             valid: true,
             userId,
             username: userLookup.username,
-            gamepasses: allPasses,
-            debug: {
-                gamesFound: allGames.length,
-                games: debugPerGame,
-            },
+            gamepassIds,
         });
     } catch (error) {
         console.error('gamepasses-for-user error:', error.message);
