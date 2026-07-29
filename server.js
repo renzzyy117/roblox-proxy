@@ -30,7 +30,6 @@ function isAllowedDomain(url) {
 }
 
 // ================== KONFIG FITUR GIFT GAMEPASS ==================
-const UNIVERSE_ID = process.env.UNIVERSE_ID; // wajib diisi di Vercel env vars
 const API_SECRET = process.env.API_SECRET; // opsional, proteksi endpoint
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL; // opsional
 
@@ -77,16 +76,16 @@ app.get('/verify-username', requireSecret, async (req, res) => {
 
 // ================== GAMEPASSES FOR USER ==================
 // GET /gamepasses-for-user?username=NamaUser
-// Ambil semua gamepass di game ini (via UNIVERSE_ID) + status kepemilikan
-// target user untuk tiap gamepass.
+// Ambil SEMUA gamepass yang dijual dari game-game bikinan target user itu
+// sendiri -- otomatis, tanpa perlu UNIVERSE_ID manual.
+//
+// Alur: username -> userId -> semua game publik milik userId -> semua
+// gamepass dari tiap game itu -> digabung jadi satu list.
 app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
     const { username } = req.query;
 
     if (!username) {
         return res.status(400).json({ valid: false, error: 'Username diperlukan' });
-    }
-    if (!UNIVERSE_ID) {
-        return res.status(500).json({ valid: false, error: 'UNIVERSE_ID belum di-set di environment variables' });
     }
 
     try {
@@ -96,51 +95,54 @@ app.get('/gamepasses-for-user', requireSecret, async (req, res) => {
         }
         const { userId } = userLookup;
 
-        // Ambil semua gamepass game ini (dengan pagination)
-        let allPasses = [];
-        let cursor = '';
-        let safety = 0;
+        // 1) Ambil semua game publik milik user ini (dengan pagination, dibatasi biar gak kelamaan)
+        let allGames = [];
+        let gameCursor = '';
+        let gameSafety = 0;
 
         do {
-            const url = `https://games.roblox.com/v1/games/${UNIVERSE_ID}/game-passes?limit=100&sortOrder=Asc${cursor ? `&cursor=${cursor}` : ''}`;
-            const passRes = await axios.get(url, { timeout: 15000 });
-            const passData = passRes.data;
+            const url = `https://games.roblox.com/v2/users/${userId}/games?accessFilter=Public&limit=50&sortOrder=Asc${gameCursor ? `&cursor=${gameCursor}` : ''}`;
+            const gameRes = await axios.get(url, { timeout: 15000 });
+            const gameData = gameRes.data;
 
-            if (passData && Array.isArray(passData.data)) {
-                allPasses = allPasses.concat(passData.data);
+            if (gameData && Array.isArray(gameData.data)) {
+                allGames = allGames.concat(gameData.data);
             }
-            cursor = passData && passData.nextPageCursor ? passData.nextPageCursor : '';
-            safety += 1;
-        } while (cursor && safety < 10);
+            gameCursor = gameData && gameData.nextPageCursor ? gameData.nextPageCursor : '';
+            gameSafety += 1;
+        } while (gameCursor && gameSafety < 5); // maksimal ~250 game
 
-        // Cek kepemilikan tiap gamepass untuk userId ini (paralel)
-        const passesWithOwnership = await Promise.all(
-            allPasses.map(async (gp) => {
-                let owned = false;
+        // 2) Ambil semua gamepass dari tiap game tsb (paralel)
+        const gamepassesPerGame = await Promise.all(
+            allGames.map(async (game) => {
                 try {
-                    const ownRes = await axios.get(
-                        `https://inventory.roblox.com/v1/users/${userId}/items/GamePass/${gp.id}/is-owned`,
+                    const passRes = await axios.get(
+                        `https://games.roblox.com/v1/games/${game.id}/game-passes?limit=100&sortOrder=Asc`,
                         { timeout: 15000 }
                     );
-                    owned = ownRes.data === true || String(ownRes.data).trim().toLowerCase() === 'true';
-                } catch (e) {
-                    owned = false;
-                }
+                    const passData = passRes.data;
+                    if (!passData || !Array.isArray(passData.data)) return [];
 
-                return {
-                    id: gp.id,
-                    name: gp.displayName || gp.name,
-                    price: gp.price === null || gp.price === undefined ? 0 : gp.price,
-                    owned,
-                };
+                    return passData.data.map((gp) => ({
+                        id: gp.id,
+                        name: gp.displayName || gp.name,
+                        price: gp.price === null || gp.price === undefined ? 0 : gp.price,
+                        gameName: game.name,
+                        universeId: game.id,
+                    }));
+                } catch (e) {
+                    return [];
+                }
             })
         );
+
+        const allPasses = gamepassesPerGame.flat();
 
         return res.status(200).json({
             valid: true,
             userId,
             username: userLookup.username,
-            gamepasses: passesWithOwnership,
+            gamepasses: allPasses,
         });
     } catch (error) {
         console.error('gamepasses-for-user error:', error.message);
